@@ -1,0 +1,82 @@
+---
+title: "ESS 330 - Daily Exercise 21"
+author: "Andie Hall"
+date: "04/21/25"
+format: html
+execute:
+  echo: true
+---
+
+### Library Code
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(tsibble)
+library(feasts)
+library(dataRetrieval)
+library(plotly)
+```
+
+### Data Import
+
+```{r}
+# Example: Cache la Poudre River at Mouth (USGS site 06752260)
+poudre_flow <- readNWISdv(siteNumber = "06752260",    # Download data from USGS for site 06752260
+                          parameterCd = "00060",      # Parameter code 00060 = discharge in cfs)
+                          startDate = "2013-01-01",   # Set the start date
+                          endDate = "2023-12-31") |>  # Set the end date
+  renameNWISColumns() |>                              # Rename columns to standard names (e.g., "Flow", "Date")
+  mutate(Date = yearmonth(Date)) |>                   # Convert daily Date values into a year-month format (e.g., "2023 Jan")
+  group_by(Date) |>                                   # Group the data by the new monthly Date
+  summarise(Flow = mean(Flow))                       # Calculate the average daily flow for each month
+```
+
+### Converting Data Frame and Extracting Components
+
+```{r}
+# Converting to Tibble Frame
+tibble_poudre <- as_tibble(poudre_flow) |> 
+  as_tsibble(index = Date)
+
+# Creating Model
+poudre_decomp <- tibble_poudre |>
+  model(STL(Flow ~ season(window = "periodic")))
+
+# Extracting Components
+poudre_components <- components(poudre_decomp)
+```
+
+### Plotting the Time Series Analysis
+
+```{r}
+# Plotting Data Series 
+poudre_plot <- poudre_components |> 
+  autoplot() +
+  labs(title = "STL Decomposition of Poudre Flow",
+       y = "Flow (cfs)", x = "Date") +
+  theme_minimal()
+
+poudre_plot
+
+# Animating the Plot
+poudre_plotly <- ggplotly(poudre_plot)
+
+poudre_plotly
+```
+
+### Visualizing Seasonal Patterns
+
+```{r}
+poudre_subseries <- tibble_poudre |> 
+  gg_subseries(Flow) +
+  labs(title = "Seasonal Subseries Plot of Poudre River Flow",
+       y = "Average Flow (cfs)", x = "Month") +
+  theme_minimal()
+
+poudre_subseries
+```
+
+### Data Analysis
+
+> With each of the time series plots, we can clearly see that there is a spike in the flow of the gauge around May and June. This makes sense as this is when the heaviest amount of rain is typically found in Northern Colorado. There is also the fact that over the years, there is an overall decrease in the amount of flow, meaning that there is less precipitation to help initiate flow. The sub-series allows for the data to be sorted by the months rather than a linear, and shows if there is any outliers that may screw the analysis of the seasons. We can see this specifically in September and slightly in April, but with all of the data sorted by month, we can see the average flow for each month and easily find the season with the highest amount of flow.
