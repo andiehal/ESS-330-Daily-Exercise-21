@@ -7,6 +7,8 @@ execute:
   echo: true
 ---
 
+# Daily Assignment 21
+
 ### Library Code
 
 ```{r}
@@ -80,3 +82,184 @@ poudre_subseries
 ### Data Analysis
 
 > With each of the time series plots, we can clearly see that there is a spike in the flow of the gauge around May and June. This makes sense as this is when the heaviest amount of rain is typically found in Northern Colorado. There is also the fact that over the years, there is an overall decrease in the amount of flow, meaning that there is less precipitation to help initiate flow. The sub-series allows for the data to be sorted by the months rather than a linear, and shows if there is any outliers that may screw the analysis of the seasons. We can see this specifically in September and slightly in April, but with all of the data sorted by month, we can see the average flow for each month and easily find the season with the highest amount of flow.
+
+# Daily Assignment 22
+
+### Library Code
+
+```{r}
+library(modeltime)
+library(tidymodels)
+library(timetk)
+library(yardstick)
+library(dplyr)
+library(lubridate)
+```
+
+### Splitting Data for Models
+
+```{r}
+
+tibble_poudre_fixed <- tibble_poudre %>%
+    mutate(Date = lubridate::ym(Date)) %>%
+    arrange(Date) %>%
+    ungroup()
+
+tibble_poudre_fixed <- tibble_poudre_fixed %>% as_tibble()
+
+splits <- time_series_split(tibble_poudre_fixed, assess = 12, cumulative = TRUE)
+
+training <-  training(splits)
+testing  <-  testing(splits)
+```
+
+### Models
+
+```{r}
+model_prophet <- prophet_reg(
+    seasonality_yearly = TRUE
+) %>%
+    set_engine("prophet")
+
+model_arima <- arima_reg() %>%
+    set_engine("auto_arima")
+
+model_fit_prophet <- model_prophet %>%
+    fit(Flow ~ Date, data = training)
+
+model_fit_arima <- model_arima %>%
+    fit(Flow ~ Date, data = training)
+
+models_table <- modeltime_table(
+    model_fit_prophet,
+    model_fit_arima
+)
+
+calibration_tbl <- models_table %>%
+    modeltime_calibrate(new_data = testing)
+
+future_forecast_tbl <- models_table %>%
+    modeltime_refit(data = tibble_poudre_fixed) %>%   
+    modeltime_forecast(h = "12 months", actual_data = tibble_poudre_fixed)
+
+future_forecast_tbl %>%
+    plot_modeltime_forecast(.interactive = FALSE)
+
+```
+
+### Importing the Actual Streamflows
+
+```{r}
+poudre_flow_2024 <- readNWISdv(siteNumber = "06752260",    # Download data from USGS for site 06752260
+                          parameterCd = "00060",      # Parameter code 00060 = discharge in cfs)
+                          startDate = "2024-01-01",   # Set the start date
+                          endDate = "2024-12-31") |>  # Set the end date
+  renameNWISColumns() |>                              # Rename columns to standard names (e.g., "Flow", "Date")
+  mutate(Date = yearmonth(Date)) |>                   # Convert daily Date values into a year-month format (e.g., "2023 Jan")
+  group_by(Date) |>                                   # Group the data by the new monthly Date
+  summarise(Flow = mean(Flow))                       # Calculate the average daily flow for each month
+
+combined_poudre <- bind_rows(poudre_flow, poudre_flow_2024)
+
+combined_tibble_poudre <- as_tibble(combined_poudre) |> 
+  as_tsibble(index = Date)
+
+```
+
+### Comparing the Models
+
+```{r}
+# Filter only 2024 predictions
+predictions_2024 <- future_forecast_tbl %>%
+    filter(.index >= yearmonth("2024 Jan")) %>%
+    select(.index, .value, .model_desc)
+
+actual_2024 <- poudre_flow_2024 %>%
+    rename(.index = Date,
+           actual_flow = Flow)
+
+comparison_tbl <- left_join(predictions_2024, actual_2024, by = ".index")
+
+comparison_tbl %>%
+    group_by(.model_desc) %>%
+    summarise(
+        RMSE = rmse_vec(truth = actual_flow, estimate = .value),
+        MAE  = mae_vec(truth = actual_flow, estimate = .value),
+        MAPE = mape_vec(truth = actual_flow, estimate = .value)
+    )
+
+```
+
+### Plotting the Models
+
+```{r}
+library(ggplot2)
+
+comparison_tbl %>%
+    ggplot(aes(x = .index)) +
+    geom_line(aes(y = actual_flow), color = "black", size = 1, linetype = "dashed") +
+    geom_line(aes(y = .value, color = .model_desc), size = 1) +
+    labs(title = "Actual vs Predicted Streamflows (2024)",
+         y = "Flow (cfs)",
+         x = "Month",
+         color = "Model") +
+    theme_minimal()
+
+```
+
+### Fitting the Linear Model
+
+```{r}
+# For one model at a time (example: Prophet model)
+prophet_comparison <- comparison_tbl %>%
+    filter(.model_desc == "PROPHET")
+
+# Fit linear model: actual vs predicted
+lm_prophet <- lm(actual_flow ~ .value, data = prophet_comparison)
+
+summary(lm_prophet)$r.squared
+
+arima_comparison <- comparison_tbl %>%
+    filter(.model_desc == "UPDATE: ARIMA(0,0,2)(0,1,1)[12]")
+
+lm_arima <- lm(actual_flow ~ .value, data = arima_comparison)
+
+glance(lm_arima) %>%
+    select(r.squared)
+
+```
+
+### Plotting
+
+```{r}
+# Compute R² for both models
+lm_prophet <- lm(actual_flow ~ .value, data = comparison_tbl %>% filter(.model_desc == "PROPHET"))
+lm_arima <- lm(actual_flow ~ .value, data = comparison_tbl %>% filter(.model_desc == "UPDATE: ARIMA(0,0,2)(0,1,1)[12]"))
+
+r_squared_prophet <- summary(lm_prophet)$r.squared
+r_squared_arima <- summary(lm_arima)$r.squared
+
+# Plot for both models
+comparison_tbl %>%
+    ggplot(aes(x = .value, y = actual_flow, color = .model_desc)) +
+    geom_point(size = 3) +
+    geom_abline(intercept = 0, slope = 1, color = "black", linetype = "dashed", size = 1) +
+    geom_smooth(method = "lm", se = FALSE) +
+    annotate("text", x = max(comparison_tbl$.value) * 0.7, 
+             y = max(comparison_tbl$actual_flow) * 0.9, 
+             label = paste("R² (Prophet) = ", round(r_squared_prophet, 3)), color = "blue", size = 5) +
+    annotate("text", x = max(comparison_tbl$.value) * 0.7, 
+             y = max(comparison_tbl$actual_flow) * 0.85, 
+             label = paste("R² (ARIMA) = ", round(r_squared_arima, 3)), color = "red", size = 5) +
+    labs(
+        title = "Predicted vs Observed Streamflow (All Models)",
+        x = "Predicted Flow (cfs)",
+        y = "Observed Flow (cfs)",
+        color = "Model"
+    ) +
+    theme_minimal()
+```
+
+> **Model Analysis**
+>
+> While both models have high R^2^s, when compared in a linear model, they look to be far from the observed flows. Arima has a higher R^2^ which details a more accurate model. The peak of the observations were far off from the observed flow, which matches with the comparison of the models to the observed flow from 2024. However, it was able to predict the periods where the flow would spike. Overall, Arima is the best model for this prediction and created a fairly accurate read.
